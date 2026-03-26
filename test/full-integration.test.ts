@@ -23,7 +23,7 @@ test("full integration with Gemini provider", async (context) => {
   }
 
   const provider = new GeminiProvider({
-    model: process.env.GEMINI_MODEL ?? "gemini-2.0-flash",
+    model: process.env.GEMINI_MODEL ?? "gemini-3-flash-preview",
     apiKey,
     baseUrl: process.env.GEMINI_BASE_URL,
     temperature: 0.2,
@@ -122,4 +122,3 @@ test("full integration with Gemini provider", async (context) => {
   console.log(saved);
   assert.ok(saved);
 });
-

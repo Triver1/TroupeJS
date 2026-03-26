@@ -46,68 +46,54 @@ Supports multiple model providers such as OpenAI, Claude, and Gemini.
 ## Example
 
 ```ts
-import { z } from "zod";
-import {
-  Agent,
-  OpenAIProvider,
-  Troupe,
-  Tool,
-} from "troupejs";
+import { Agent, GeminiProvider, Troupe } from "troupejs";
 
-const searchWeb = new Tool({
-  name: "searchWeb",
-  description: "Search the web for recent information",
-  inputSchema: z.object({
-    query: z.string(),
-  }),
-  async function({ query }) {
-    return { results: [`Result for ${query}`] };
-  },
+const provider = new GeminiProvider({
+  model: "gemini-3-flash-preview",
+  apiKey: process.env.GEMINI_API_KEY!,
+  temperature: 0.3,
 });
 
-const provider = new OpenAIProvider({
-  model: "gpt-4.1",
-  apiKey: process.env.OPENAI_API_KEY!,
-  temperature: 0.2,
+const triageLead = new Agent({
+  name: "triage-lead",
+  systemPrompt:
+    "You are a customer support lead. Identify the user's core issue, the requested outcome, and the tone we should use in the reply.",
+  modelConfig: { provider },
 });
 
-const moderator = new Agent({
-  name: "moderator",
-  personality: "Structured and neutral",
-  systemPrompt: "Keep the discussion focused and concise.",
-  modelConfig: {
-    provider,
-  },
+const policyChecker = new Agent({
+  name: "policy-checker",
+  systemPrompt:
+    "You check whether the response makes realistic promises. Only approve actions that a support team could actually take.",
+  modelConfig: { provider },
 });
 
-const stoic = new Agent({
-  name: "stoic",
-  personality: "Clear and disciplined",
-  systemPrompt: "Argue from a stoic point of view.",
-  modelConfig: {
-    provider,
-  },
-  tools: [searchWeb],
-});
-
-const existentialist = new Agent({
-  name: "existentialist",
-  personality: "Reflective and questioning",
-  systemPrompt: "Argue from an existentialist point of view.",
-  modelConfig: {
-    provider,
-  },
-  tools: [searchWeb],
+const replyWriter = new Agent({
+  name: "reply-writer",
+  systemPrompt:
+    "Write concise, friendly customer emails. Apologize when appropriate, answer directly, and end with a clear next step.",
+  modelConfig: { provider },
 });
 
 const troupe = new Troupe({
-  name: "philosophy-circle",
-  agents: [moderator, stoic, existentialist],
+  name: "support-inbox",
+  agents: [triageLead, policyChecker, replyWriter],
 });
 
-const replies = await troupe.send(
-  "Is it better to be happy or to know the truth?"
+await troupe.send(`
+Review this customer email and decide how we should answer.
+
+Customer email:
+"Hi team, I upgraded to the Pro plan this morning but my workspace still shows Free.
+I need the extra seats before a client demo in two hours. Can you help?"
+
+Discuss the issue briefly first.
+`);
+
+const finalReply = await troupe.sendTo(
+  "reply-writer",
+  "Write the final customer reply in under 120 words.",
 );
 
-console.log(replies.map((reply) => `${reply.sender}: ${reply.content}`));
-
+console.log(finalReply?.content);
+```
