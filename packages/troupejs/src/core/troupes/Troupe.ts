@@ -17,7 +17,6 @@ export interface TroupeConversationConfig {
   routerName?: string;
   maxRounds?: number;
   maxParticipants?: number;
-  maxNextRoundQuestions?: number;
   maxContextMessages?: number;
 }
 

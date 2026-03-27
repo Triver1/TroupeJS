@@ -15,7 +15,6 @@ const DEFAULT_CONVERSATION_CONFIG: Required<TroupeConversationConfig> = {
   routerName: "",
   maxRounds: 5,
   maxParticipants: 4,
-  maxNextRoundQuestions: 6,
   maxContextMessages: 10,
 };
 
@@ -34,7 +33,12 @@ interface ConversationRunContext {
   nextRoundQueue: RoundRequest[];
   scheduledRounds: number;
   hitRoundLimit: boolean;
-  askGroup: (from: Agent, input: AskGroupInput) => ToolResult;
+  pendingGroupHandoffs: Array<{
+    sender: string;
+    message: string;
+  }>;
+  nextRoundScheduled: boolean;
+  tellGroup: (from: Agent, input: TellGroupInput) => ToolResult;
 }
 
 interface ToolResult {
@@ -43,12 +47,32 @@ interface ToolResult {
   data?: unknown;
 }
 
-interface AskGroupInput {
-  question?: string;
+interface TellGroupInput {
+  message?: string;
 }
 
 interface PostOutboundInput {
   content?: string;
+}
+
+function validateTellGroupMessage(message: string): string | null {
+  const normalized = message.trim().toLowerCase();
+  const planningPatterns = [
+    /^i need to\b/,
+    /^let me\b/,
+    /^i(?:'| wi)ll\b/,
+    /^we need to gather\b/,
+    /^we should gather\b/,
+    /^i need more information\b/,
+    /^i need more input\b/,
+    /^let us\b/,
+  ];
+
+  if (planningPatterns.some((pattern) => pattern.test(normalized))) {
+    return "Message to group must share a concrete finding, warning, recommendation, or specific question, not planning narration.";
+  }
+
+  return null;
 }
 
 function mergeConversationConfig(
@@ -80,17 +104,17 @@ function getAgentNames(troupe: Troupe): string[] {
   return troupe.getAgents().map((agent) => agent.name);
 }
 
-function createAskGroupTool(agent: Agent): Tool<AskGroupInput, ToolResult> {
+function createTellGroupTool(agent: Agent): Tool<TellGroupInput, ToolResult> {
   return new Tool({
-    name: "askGroup",
+    name: "tellGroup",
     description:
-      "Ask the troupe a question for the next round. Use when you need group input.",
+      "Tell the troupe something for the next round. Use this only to share a concrete finding, warning, recommendation, or a specific question the group should investigate next. Do not use this tool for planning narration like 'I need to' or 'let me'.",
     historyMode: "steering",
     historyFormatter: (output) => {
       if (!output.ok) {
-        return `Conversation update: group question failed (${output.message}).`;
+        return `Conversation update: message to group failed (${output.message}).`;
       }
-      return "Conversation update: queued a group question for the next round.";
+      return "Conversation update: queued a message to the group for the next round.";
     },
     function: (input) => {
       const context = activeRunByAgent.get(agent);
@@ -98,7 +122,7 @@ function createAskGroupTool(agent: Agent): Tool<AskGroupInput, ToolResult> {
         return { ok: false, message: "No active troupe run." };
       }
 
-      return context.askGroup(agent, input);
+      return context.tellGroup(agent, input);
     },
   });
 }
@@ -137,8 +161,8 @@ function createPostOutboundTool(
 
 function ensureConversationTools(agent: Agent, troupe: Troupe): void {
   const toolNames = new Set(agent.tools.map((tool) => tool.name));
-  if (!toolNames.has("askGroup")) {
-    agent.tools.push(createAskGroupTool(agent));
+  if (!toolNames.has("tellGroup")) {
+    agent.tools.push(createTellGroupTool(agent));
   }
   if (!toolNames.has("post_outbound")) {
     agent.tools.push(createPostOutboundTool(troupe, agent));
@@ -227,10 +251,14 @@ function buildTroupeSystemFrame(troupe: Troupe, agent: Agent): string {
     roster,
     "",
     "Coordination rules:",
+    "- You may think privately however you want, but shared troupe messages must contain useful content immediately.",
     "- Only reply if your role is relevant.",
     "- Do not repeat points already covered by other agents.",
+    "- Do not open shared messages with planning narration like 'I need to', 'let me', or 'I will'. Start with your judgment, warning, recommendation, or question.",
     "- If you need missing info, use tools instead of guessing.",
-    "- If the troupe needs another pass, use askGroup to ask the whole group a focused follow-up question.",
+    "- Use tellGroup only when you have something interesting to say to the group: a concrete finding, warning, recommendation, or a specific question the group should investigate next.",
+    "- Do not use tellGroup to narrate your thinking process.",
+    "- The roster above tells you who the other agents are and what they focus on. Use that context when deciding what to say and what to ask the group to investigate next.",
     "- Provide short internal notes by default.",
     "- Use post_outbound only when you're ready to publish an outbound message.",
   ].join("\n");
@@ -351,6 +379,28 @@ function buildFinalAnswerPrompt(troupe: Troupe): string {
   ].join("\n");
 }
 
+function buildNextRoundPrompt(
+  replies: Message[],
+  handoffs: Array<{ sender: string; message: string }>,
+): string {
+  const latestRound = replies.length > 0
+    ? replies.map((reply) => `${reply.sender ?? "agent"} said:\n${reply.content}`).join("\n\n")
+    : "No agent replies were recorded in the latest round.";
+  const handoffText = handoffs.length > 0
+    ? handoffs.map((handoff) => `${handoff.sender} flagged:\n${handoff.message}`).join("\n\n")
+    : "No additional handoffs were added.";
+
+  return [
+    "Continue the troupe conversation using the latest round.",
+    "",
+    "Latest round:",
+    latestRound,
+    "",
+    "Carry-forward handoffs:",
+    handoffText,
+  ].join("\n");
+}
+
 export class TroupeExecutor {
   static async send(troupe: Troupe, content: string): Promise<Message[]> {
     const config = mergeConversationConfig(troupe.conversation);
@@ -365,24 +415,30 @@ export class TroupeExecutor {
       nextRoundQueue: [],
       scheduledRounds: 1,
       hitRoundLimit: false,
-      askGroup: (from, input) => {
-        if (!input.question || input.question.trim().length === 0) {
-          return { ok: false, message: "Missing question." };
+      pendingGroupHandoffs: [],
+      nextRoundScheduled: false,
+      tellGroup: (from, input) => {
+        if (!input.message || input.message.trim().length === 0) {
+          return { ok: false, message: "Missing message." };
         }
-        if (runContext.scheduledRounds >= config.maxRounds) {
+        const validationError = validateTellGroupMessage(input.message);
+        if (validationError) {
+          return { ok: false, message: validationError };
+        }
+        if (!runContext.nextRoundScheduled && runContext.scheduledRounds >= config.maxRounds) {
           runContext.hitRoundLimit = true;
           return { ok: false, message: "Round limit reached." };
         }
-        if (runContext.nextRoundQueue.length >= config.maxNextRoundQuestions) {
-          return { ok: false, message: "Next-round queue is full." };
-        }
 
-        runContext.nextRoundQueue.push({
-          content: input.question.trim(),
+        runContext.pendingGroupHandoffs.push({
           sender: from.name,
-          kind: "sub",
+          message: input.message.trim(),
         });
-        runContext.scheduledRounds += 1;
+
+        if (!runContext.nextRoundScheduled) {
+          runContext.nextRoundScheduled = true;
+          runContext.scheduledRounds += 1;
+        }
         return {
           ok: true,
           message: "Queued for next round.",
@@ -416,6 +472,20 @@ export class TroupeExecutor {
         conversation: runContext,
       });
       allReplies.push(...replies);
+
+      if (runContext.nextRoundScheduled) {
+        queue.push({
+          content: buildNextRoundPrompt(
+            replies,
+            runContext.pendingGroupHandoffs.splice(0),
+          ),
+          sender: "system",
+          kind: "sub",
+        });
+        runContext.nextRoundScheduled = false;
+      } else if (runContext.pendingGroupHandoffs.length > 0) {
+        runContext.pendingGroupHandoffs.splice(0);
+      }
 
       if (runContext.nextRoundQueue.length > 0) {
         queue.push(...runContext.nextRoundQueue.splice(0));

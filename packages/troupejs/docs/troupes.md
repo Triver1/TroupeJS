@@ -102,4 +102,4 @@ const troupe = new Troupe({
 
 During troupe runs, agents can call:
 
-- `askGroup` to queue a troupe-wide question for the next round
+- `tellGroup` to queue a message to the troupe for the next round

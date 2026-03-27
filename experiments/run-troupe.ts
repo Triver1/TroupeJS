@@ -27,8 +27,8 @@ const MAX_RETRIES = Number(process.env.EXPERIMENT_RETRIES ?? "2");
 const RETRY_DELAY_MS = Number(process.env.EXPERIMENT_RETRY_DELAY_MS ?? "1500");
 const DEBUG = process.env.EXPERIMENT_DEBUG === "1";
 
-const customerEmail =
-  'Hi support, we merged two hospital departments into one workspace over the weekend and enabled SSO enforcement plus SCIM provisioning this morning. Now some clinicians can sign in, 23 cannot, a few are landing in the wrong department, and the audit log shows repeated deprovision/reprovision events. The billing page says our Enterprise renewal is unpaid, but finance has a wire confirmation from five days ago. We also have a HIPAA audit tomorrow and shift handoff starts in 35 minutes. Please tell us exactly what is happening, what is safe to do right now, and what information you need from us.';
+const scenarioPrompt =
+  'Captain, enemy sails off the starboard bow. A fast brig is closing with us just before dusk. The wind favors them, our powder room took spray an hour ago, and the crew is split: some want to run for the shoals, others want to swing wide and board. We have one chance to act before they enter clean cannon range. What do we do?';
 
 function createProvider(temperature: number) {
   if (providerName === "deepseek") {
@@ -72,87 +72,79 @@ function createDebugCallbacks(name: string) {
 }
 
 function createTroupe(): Troupe {
-  const incidentCommander = new Agent({
-    name: "incident-commander",
+  const captain = new Agent({
+    name: "captain",
     systemPrompt: [
-      "You run urgent enterprise SaaS incidents.",
-      "On your first turn, gather specialist input before concluding.",
-      "Use askGroup when the troupe needs another pass on a focused question.",
-      "After specialist answers exist, summarize the most likely failure domains and next checks.",
-      "Reply only as internal notes in exactly 3 bullets.",
-      "Do not write customer-facing prose.",
+      "You are the captain of a pirate crew facing a live naval threat.",
+      "Think like a decisive but practical commander.",
+      "On your first turn, give a provisional read and name the exact uncertainty you want the crew to resolve.",
+      "Once enough input exists, give a concrete plan in a captain's voice.",
+      "Keep replies short, vivid, and specific.",
     ].join(" "),
     modelConfig: { provider: createProvider(0.2) },
-    callbacks: createDebugCallbacks("incident-commander"),
+    callbacks: createDebugCallbacks("captain"),
   });
 
-  const billingOps = new Agent({
-    name: "billing-ops",
+  const cannoneer = new Agent({
+    name: "cannoneer",
     systemPrompt: [
-      "You are a billing operations specialist for an enterprise SaaS platform.",
-      "Analyze invoices, subscriptions, entitlements, renewal mapping, and plan-sync failures.",
-      "Reply only with billing or entitlement analysis in exactly 3 bullets.",
-      "Do not comment on SSO configuration beyond plan-related effects.",
-      "Do not write customer-facing prose.",
+      "You are the ship's cannoneer.",
+      "Judge range, firing angles, powder quality, reload speed, hull damage, and whether the guns can decide the fight.",
+      "Speak plainly about what the cannons can and cannot do right now.",
+      "Keep replies short and concrete.",
     ].join(" "),
     modelConfig: { provider: createProvider(0.1) },
-    callbacks: createDebugCallbacks("billing-ops"),
+    callbacks: createDebugCallbacks("cannoneer"),
   });
 
-  const accessEngineer = new Agent({
-    name: "access-engineer",
+  const pirate = new Agent({
+    name: "pirate",
     systemPrompt: [
-      "You are an access and identity engineer.",
-      "Analyze SSO enforcement, IdP configuration, session invalidation, and safe access restoration steps.",
-      "Recommend only actions that preserve identity controls.",
-      "Reply only as internal notes in exactly 3 bullets.",
-      "Do not write customer-facing prose.",
+      "You are a seasoned pirate and boarding fighter.",
+      "Judge morale, boarding chances, sail handling, close-quarters risk, and what the enemy crew is likely to do.",
+      "Push for bold action when it is real, but do not pretend the odds are better than they are.",
+      "Keep replies short and concrete.",
     ].join(" "),
     modelConfig: { provider: createProvider(0.1) },
-    callbacks: createDebugCallbacks("access-engineer"),
+    callbacks: createDebugCallbacks("pirate"),
   });
 
-  const riskPolicy = new Agent({
-    name: "risk-policy",
+  const navigator = new Agent({
+    name: "navigator",
     systemPrompt: [
-      "You are a support policy and risk reviewer.",
-      "Flag unsafe promises, missing verification steps, and actions that could weaken access controls.",
-      "If another agent proposes disabling or bypassing access controls, evaluate that risk directly.",
-      "Reply only as internal notes in exactly 3 bullets.",
-      "Do not write customer-facing prose.",
+      "You are the ship's navigator and sailing master.",
+      "Judge wind, currents, shoals, turning room, dusk visibility, and whether escape or positioning is possible.",
+      "Keep replies short and concrete.",
     ].join(" "),
     modelConfig: { provider: createProvider(0.1) },
-    callbacks: createDebugCallbacks("risk-policy"),
+    callbacks: createDebugCallbacks("navigator"),
   });
 
-  const customerComms = new Agent({
-    name: "customer-comms",
+  const quartermaster = new Agent({
+    name: "quartermaster",
     systemPrompt: [
-      "You write customer-facing enterprise support replies.",
-      "If billing-ops, access-engineer, and risk-policy notes are not already present in the troupe conversation, do not reply yet.",
-      "Respond directly to the customer with one short paragraph and, if needed, a short list of next steps.",
-      "Acknowledge urgency, avoid invented facts, ask only for the minimum information needed to identify the workspace and verify the admin, and mention that billing and access are being checked in parallel.",
-      "Do not mention internal teams by role name.",
+      "You are the quartermaster.",
+      "Judge crew readiness, supplies, damage tolerance, discipline, and whether the ship can survive a drawn-out fight.",
+      "Keep replies short and concrete.",
     ].join(" "),
     modelConfig: { provider: createProvider(0.3) },
-    callbacks: createDebugCallbacks("customer-comms"),
+    callbacks: createDebugCallbacks("quartermaster"),
   });
 
   return new Troupe({
-    name: "clinic-access-war-room",
+    name: "blackwake-council",
     conversation: {
-      routerName: "incident-commander",
+      routerName: "captain",
       maxRounds: 10,
       maxParticipants: 4,
-      maxNextRoundQuestions: 4,
       maxContextMessages: 12,
     },
     agents: [
-      incidentCommander,
-      billingOps,
-      accessEngineer,
-      riskPolicy,
-      customerComms,
+      captain,
+      cannoneer,
+      pirate,
+      navigator,
+      quartermaster,
     ],
   });
 }
@@ -169,18 +161,18 @@ function printTranscript(troupe: Troupe) {
 
 async function runScenario(): Promise<void> {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
-    console.log(`\n=== Scenario: clinic-sso-entitlement-incident (attempt ${attempt}/${MAX_RETRIES}) ===`);
+    console.log(`\n=== Scenario: pirate-crew-enemy-sighting (attempt ${attempt}/${MAX_RETRIES}) ===`);
 
     try {
       const troupe = createTroupe();
-      const replies = await troupe.send(customerEmail);
+      const replies = await troupe.send(scenarioPrompt);
 
       console.log("\n[Transcript]");
       printTranscript(troupe);
 
-      const finalReply = replies.find((reply) => reply.sender === "customer-comms");
-      console.log("\n[Customer Comms Reply]");
-      console.log(finalReply?.content ?? "(no reply)");
+      const captainReply = [...replies].reverse().find((reply) => reply.sender === "captain");
+      console.log("\n[Captain Reply]");
+      console.log(captainReply?.content ?? "(no reply)");
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

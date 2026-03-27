@@ -128,7 +128,14 @@ class RoundLimitToolProvider extends BaseProvider {
     toolCalls?: Array<{ toolName: string; input: unknown; id?: string }>;
   }> {
     this.prompts.push(request.input);
-    this.#calls += 1;
+
+    if (request.responseSchema) {
+      return {
+        content: "[]",
+        shouldReply: false,
+        parsed: [],
+      };
+    }
 
     if (request.input.includes("The max amount of rounds is finished.")) {
       return {
@@ -136,15 +143,17 @@ class RoundLimitToolProvider extends BaseProvider {
       };
     }
 
+    this.#calls += 1;
+
     if (this.#calls === 1) {
       return {
         content: "",
         toolCalls: [
           {
             id: "call_1",
-            toolName: "askGroup",
+            toolName: "tellGroup",
             input: {
-              question: "What else should the group consider?",
+              message: "The group should also consider identity provisioning drift.",
             },
           },
         ],
@@ -153,6 +162,99 @@ class RoundLimitToolProvider extends BaseProvider {
 
     return {
       content: "Initial discussion note.",
+    };
+  }
+}
+
+class AggregatingGroupProvider extends BaseProvider {
+  readonly promptsByAgent = new Map<string, string[]>();
+  readonly callsByAgent = new Map<string, number>();
+
+  async generate(request: ProviderRequest): Promise<{
+    content?: string;
+    shouldReply?: boolean;
+    toolCalls?: Array<{ toolName: string; input: unknown; id?: string }>;
+    parsed?: unknown;
+  }> {
+    if (request.responseSchema) {
+      return {
+        content: "[]",
+        shouldReply: false,
+        parsed: [],
+      };
+    }
+
+    const prompts = this.promptsByAgent.get(request.agentName) ?? [];
+    prompts.push(request.input);
+    this.promptsByAgent.set(request.agentName, prompts);
+
+    const callCount = (this.callsByAgent.get(request.agentName) ?? 0) + 1;
+    this.callsByAgent.set(request.agentName, callCount);
+
+    if (callCount === 1) {
+      return {
+        content: "",
+        toolCalls: [
+          {
+            id: `call_${request.agentName}`,
+            toolName: "tellGroup",
+            input: {
+              message: `${request.agentName} thinks identity provisioning drift should be checked.`,
+            },
+          },
+        ],
+      };
+    }
+
+    if (request.input.includes("Continue the troupe conversation using the latest round.")) {
+      return {
+        content: `${request.agentName} follow-up`,
+      };
+    }
+
+    return {
+      content: `${request.agentName} first reply`,
+    };
+  }
+}
+
+class TellGroupValidationProvider extends BaseProvider {
+  secondRequestMessages: Message[] = [];
+  #calls = 0;
+
+  async generate(request: ProviderRequest): Promise<{
+    content?: string;
+    shouldReply?: boolean;
+    toolCalls?: Array<{ toolName: string; input: unknown; id?: string }>;
+    parsed?: unknown;
+  }> {
+    if (request.responseSchema) {
+      return {
+        content: "[]",
+        shouldReply: false,
+        parsed: [],
+      };
+    }
+
+    this.#calls += 1;
+    if (this.#calls === 1) {
+      return {
+        content: "",
+        toolCalls: [
+          {
+            id: "call_1",
+            toolName: "tellGroup",
+            input: {
+              message: "I need to gather more input from the crew first.",
+            },
+          },
+        ],
+      };
+    }
+
+    this.secondRequestMessages = request.messages;
+    return {
+      content: "Concrete reply.",
     };
   }
 }
@@ -318,7 +420,6 @@ test("ending on the last allowed round without hitting the cap does not trigger 
     conversation: {
       maxRounds: 1,
       maxParticipants: 1,
-      maxNextRoundQuestions: 1,
       maxContextMessages: 10,
     },
   });
@@ -351,7 +452,6 @@ test("hitting the troupe round cap triggers one final answer prompt", async () =
     conversation: {
       maxRounds: 1,
       maxParticipants: 1,
-      maxNextRoundQuestions: 1,
       maxContextMessages: 10,
     },
   });
@@ -368,6 +468,73 @@ test("hitting the troupe round cap triggers one final answer prompt", async () =
   assert.ok(
     provider.prompts.some((prompt) =>
       prompt.includes("The max amount of rounds is finished.")
+    ),
+  );
+});
+
+test("tellGroup synthesizes one shared next-round prompt from the latest round", async () => {
+  const provider = new AggregatingGroupProvider();
+  const alpha = new Agent({
+    name: "alpha",
+    systemPrompt: "Share findings.",
+    modelConfig: { provider },
+  });
+  const beta = new Agent({
+    name: "beta",
+    systemPrompt: "Share findings.",
+    modelConfig: { provider },
+  });
+
+  const troupe = new Troupe({
+    name: "aggregation-circle",
+    agents: [alpha, beta],
+    conversation: {
+      maxRounds: 2,
+      maxParticipants: 2,
+      maxContextMessages: 10,
+    },
+  });
+
+  await troupe.send("Start the round.");
+
+  const secondPrompt = provider.promptsByAgent.get("alpha")?.find((prompt) =>
+    prompt.includes("Continue the troupe conversation using the latest round.")
+  ) ?? "";
+
+  assert.match(secondPrompt, /Latest round:/);
+  assert.match(secondPrompt, /alpha said:/);
+  assert.match(secondPrompt, /beta said:/);
+  assert.match(secondPrompt, /Carry-forward handoffs:/);
+  assert.match(secondPrompt, /alpha flagged:/);
+  assert.match(secondPrompt, /beta flagged:/);
+});
+
+test("tellGroup rejects planning narration while keeping the correction in local history", async () => {
+  const provider = new TellGroupValidationProvider();
+  const agent = new Agent({
+    name: "captain",
+    systemPrompt: "Lead the crew.",
+    modelConfig: { provider },
+  });
+
+  const troupe = new Troupe({
+    name: "validation-circle",
+    agents: [agent],
+    conversation: {
+      maxRounds: 2,
+      maxParticipants: 1,
+      maxContextMessages: 10,
+    },
+  });
+
+  const replies = await troupe.send("Enemy ahead.");
+
+  assert.equal(replies[0]?.content, "Concrete reply.");
+  assert.ok(
+    provider.secondRequestMessages.some((message) =>
+      message.content.includes(
+        "Message to group must share a concrete finding, warning, recommendation, or specific question",
+      )
     ),
   );
 });
