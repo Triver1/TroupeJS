@@ -96,4 +96,31 @@ const finalReply = await troupe.sendTo(
 );
 
 console.log(finalReply?.content);
+
+const policyReply = await triageLead.sendToAgent(
+  "policy-checker",
+  "Check whether promising immediate activation would be safe.",
+);
+
+console.log(policyReply);
+```
+
+## React Components
+
+An optional React adapter lives in `packages/troupejs-react`.
+
+It includes:
+- `useTroupeRun(events)` to derive agent status and final output from a troupe event list
+- `useTroupeEventStream(url)` to subscribe to a server-sent event stream of troupe updates
+- `AgentStatusList`, `TroupeTimeline`, and `FinalReplyCard` for a minimal agent console
+
+## Playground
+
+A Vite playground lives in `apps/playground` and shows how to render a troupe run in React without moving model execution into the browser.
+
+Run it with:
+
+```bash
+npm install
+npm run dev:playground
 ```
